@@ -22,11 +22,12 @@ from aiohttp import web
 
 SERVER_NAME = "Metal Drops"
 
-TICKET_CATEGORY_ID = 1556534009733840936          # ID of the category where ticket channels go
-STAFF_ROLE_IDS = []             # e.g. [123456789012345678]
-LOG_CHANNEL_ID = 1545780177374675135              # Channel for transcripts
-ACCEPTED_ROLE_ID = 0            # Role given on accept, 0 = none
+TICKET_CATEGORY_ID = 1556534009733840936        # ID of the category where ticket channels go
+STAFF_ROLE_IDS = [1545782832004206592]                             # <-- PUT YOUR STAFF/MANAGER ROLE ID(S) HERE, e.g. [123456789012345678]
+LOG_CHANNEL_ID = 1545780177374675135            # Channel for transcripts
+ACCEPTED_ROLE_ID = 0                            # Role given on accept, 0 = none
 ANSWER_TIMEOUT_MINUTES = 15
+PANEL_BANNER_URL = ""                           # Optional: URL to a banner image for the panel embed
 
 POSITIONS = {
     "ticket_manager": {
@@ -157,6 +158,18 @@ def is_staff(member: discord.Member) -> bool:
         return False
 
 
+def no_permission_embed() -> discord.Embed:
+    embed = discord.Embed(
+        description=(
+            "🚫 **No Permission**\n"
+            "Only **Metal Drops Managers/Admins** can perform this action."
+        ),
+        color=COLOR_RED,
+    )
+    embed.set_footer(text=f"{SERVER_NAME} • Staff Applications")
+    return embed
+
+
 async def find_user_ticket(guild: discord.Guild, user_id: int):
     category = guild.get_channel(TICKET_CATEGORY_ID)
     if not isinstance(category, discord.CategoryChannel):
@@ -177,6 +190,68 @@ async def safe_delete_channel(channel: discord.abc.GuildChannel, reason: str = "
         logger.exception("Failed to delete channel %s", getattr(channel, "id", "?"))
     except Exception:
         logger.exception("Unexpected error deleting channel")
+
+
+async def upload_transcript_to_log(guild: discord.Guild | None, app_id: str, transcript_text: str):
+    if not guild:
+        return
+    log_channel = guild.get_channel(LOG_CHANNEL_ID)
+    if not log_channel:
+        logger.warning("LOG_CHANNEL_ID not found or invalid")
+        return
+    try:
+        file = discord.File(io.BytesIO(transcript_text.encode("utf-8")), filename=f"transcript-{app_id}.txt")
+        await log_channel.send(content=f"📄 Transcript for application #{app_id}", file=file)
+    except Exception:
+        logger.exception("Failed to upload transcript to log channel")
+
+
+async def send_decision_dm(member, app_id: str, position_name: str, accepted: bool,
+                            reason: str | None, transcript_text: str) -> bool:
+    if not member:
+        return False
+    try:
+        if accepted:
+            desc = (
+                f"🎉 Your application **#{app_id}** for **{position_name}** in **{SERVER_NAME}** "
+                f"was **ACCEPTED**! Welcome aboard! 🥳"
+            )
+            color = COLOR_GREEN
+        else:
+            desc = (
+                f"❌ Your application **#{app_id}** for **{position_name}** in **{SERVER_NAME}** "
+                f"was **DENIED**.\n**Reason:** {reason or 'No reason provided.'}"
+            )
+            color = COLOR_RED
+        embed = discord.Embed(description=desc, color=color)
+        embed.set_footer(text=f"{SERVER_NAME} • Staff Applications")
+        file = discord.File(io.BytesIO(transcript_text.encode("utf-8")), filename=f"transcript-{app_id}.txt")
+        await member.send(embed=embed, file=file)
+        return True
+    except (discord.Forbidden, discord.HTTPException):
+        return False
+    except Exception:
+        logger.exception("Unexpected error sending decision DM")
+        return False
+
+
+async def send_transcript_dm(member, app_id: str, transcript_text: str) -> bool:
+    if not member:
+        return False
+    try:
+        embed = discord.Embed(
+            description=f"📄 Here is the transcript for your application **#{app_id}** in **{SERVER_NAME}**.",
+            color=COLOR_BLURPLE,
+        )
+        embed.set_footer(text=f"{SERVER_NAME} • Staff Applications")
+        file = discord.File(io.BytesIO(transcript_text.encode("utf-8")), filename=f"transcript-{app_id}.txt")
+        await member.send(embed=embed, file=file)
+        return True
+    except (discord.Forbidden, discord.HTTPException):
+        return False
+    except Exception:
+        logger.exception("Unexpected error sending transcript DM")
+        return False
 
 
 # =========================================================================
@@ -203,6 +278,7 @@ class MetalDropsBot(commands.Bot):
     async def setup_hook(self):
         self.add_view(PanelView())
         self.add_view(ReviewView())
+        self.add_view(CloseTicketView())
         try:
             await self.tree.sync()
         except Exception:
@@ -338,7 +414,7 @@ async def run_interview(channel: discord.TextChannel, user: discord.Member, posi
     try:
         staff_mentions = " ".join(f"<@&{rid}>" for rid in STAFF_ROLE_IDS)
         intro = discord.Embed(
-            title=f"Application Started: {SERVER_NAME}",
+            title=f"📝 Application Started: {SERVER_NAME}",
             description=(
                 f"You are applying for **{position['name']}**.\n"
                 f"There are **10 questions**.\n"
@@ -422,7 +498,7 @@ async def run_interview(channel: discord.TextChannel, user: discord.Member, posi
 def build_summary_embeds(user: discord.Member, position: dict, answers: list, app_id: str):
     embeds = []
     current = discord.Embed(
-        title=f"📋 Application Summary - #{app_id}",
+        title=f"📋 Application Summary — #{app_id}",
         description=f"Applicant: {user.mention}\nPosition: **{position['name']}**",
         color=COLOR_BLURPLE,
     )
@@ -437,7 +513,7 @@ def build_summary_embeds(user: discord.Member, position: dict, answers: list, ap
         if current_len + field_len > 5500 or len(current.fields) >= 24:
             embeds.append(current)
             current = discord.Embed(
-                title=f"📋 Application Summary - #{app_id} (cont.)", color=COLOR_BLURPLE
+                title=f"📋 Application Summary — #{app_id} (cont.)", color=COLOR_BLURPLE
             )
             current.set_footer(text=f"{SERVER_NAME} • Staff Applications")
             current_len = len(current.title or "")
@@ -465,16 +541,26 @@ async def post_summary_and_pending(channel: discord.TextChannel, user: discord.M
     except Exception:
         logger.exception("Failed to update channel topic to pending")
 
+    staff_mentions = " ".join(f"<@&{rid}>" for rid in STAFF_ROLE_IDS)
+
     final_embed = discord.Embed(
+        title="📥 Application Ready for Review",
         description=(
-            f"Your application (#{app_id}) has been received by **{SERVER_NAME}** staff! "
-            f"You will be notified via DM once a decision is made."
+            f"Your application (**#{app_id}**) has been received by **{SERVER_NAME}** staff! 🎉\n\n"
+            f"📌 Our managers will review it shortly.\n"
+            f"📬 You will be notified via **DM** once a decision is made.\n\n"
+            f"Thank you for applying to **{SERVER_NAME}**! 🤘"
         ),
         color=COLOR_ORANGE,
     )
     final_embed.set_footer(text=f"{SERVER_NAME} • Staff Applications")
     try:
-        await channel.send(embed=final_embed, view=ReviewView())
+        await channel.send(
+            content=staff_mentions if staff_mentions else None,
+            embed=final_embed,
+            view=ReviewView(),
+            allowed_mentions=discord.AllowedMentions(roles=True),
+        )
     except Exception:
         logger.exception("Failed to post pending message with review buttons")
 
@@ -487,9 +573,7 @@ async def handle_review(interaction: discord.Interaction, accepted: bool):
     member = interaction.user
     if not isinstance(member, discord.Member) or not is_staff(member):
         try:
-            await interaction.response.send_message(
-                "You don't have permission to review applications.", ephemeral=True
-            )
+            await interaction.response.send_message(embed=no_permission_embed(), ephemeral=True)
         except Exception:
             pass
         return
@@ -552,6 +636,13 @@ async def finalize_review(interaction: discord.Interaction, channel: discord.Tex
         except Exception:
             logger.exception("Failed to disable review buttons")
 
+    try:
+        new_status = "accepted" if accepted else "denied"
+        new_topic = build_topic(applicant_id, position_id, app_id, new_status)
+        await channel.edit(topic=new_topic)
+    except Exception:
+        logger.exception("Failed to update topic after decision")
+
     if accepted and ACCEPTED_ROLE_ID and member and guild:
         try:
             role = guild.get_role(ACCEPTED_ROLE_ID)
@@ -560,45 +651,47 @@ async def finalize_review(interaction: discord.Interaction, channel: discord.Tex
         except Exception:
             logger.exception("Failed to add accepted role")
 
-    dm_sent = False
-    if member:
-        try:
-            if accepted:
-                await member.send(
-                    f"🎉 Your application #{app_id} for **{position['name']}** in **{SERVER_NAME}** was **ACCEPTED**!"
-                )
-            else:
-                await member.send(
-                    f"❌ Your application #{app_id} for **{position['name']}** in **{SERVER_NAME}** was "
-                    f"**DENIED**. Reason: {reason or 'No reason provided.'}"
-                )
-            dm_sent = True
-        except (discord.Forbidden, discord.HTTPException):
-            dm_sent = False
-
-    decision_word = "ACCEPTED" if accepted else "DENIED"
-    mention = member.mention if member else f"<@{applicant_id}>"
-    try:
-        if dm_sent:
-            await channel.send(f"{mention} Your application has been **{decision_word}**. Check your DMs for details.")
-        else:
-            extra = f" Reason: {reason or 'No reason provided.'}" if not accepted else ""
-            await channel.send(
-                f"{mention} Your application has been **{decision_word}**!{extra} (We couldn't DM you.)"
-            )
-    except Exception:
-        logger.exception("Failed to post decision message in channel")
-
-    try:
-        await interaction.followup.send(f"Application #{app_id} marked as {decision_word}.", ephemeral=True)
-    except Exception:
-        pass
-
     decision_label = "ACCEPTED" if accepted else "DENIED"
     transcript_text = await build_transcript_text(
         channel, member, applicant_id, position, app_id, decision_label, reason, interaction.user
     )
-    asyncio.create_task(upload_transcript_and_delete(guild, channel, transcript_text, app_id))
+
+    await upload_transcript_to_log(guild, app_id, transcript_text)
+    dm_sent = await send_decision_dm(member, app_id, position["name"], accepted, reason, transcript_text)
+
+    mention = member.mention if member else f"<@{applicant_id}>"
+    result_lines = [
+        f"{mention}'s application has been **{decision_label}** by {interaction.user.mention}.",
+        "",
+    ]
+    if dm_sent:
+        result_lines.append("📄 A full transcript has been sent to your DMs.")
+    else:
+        result_lines.append("⚠️ We couldn't DM you — please contact staff for details.")
+    if not accepted and reason:
+        result_lines.append(f"**Reason:** {reason}")
+
+    result_embed = discord.Embed(
+        title="✅ Application Accepted" if accepted else "❌ Application Denied",
+        description="\n".join(result_lines),
+        color=COLOR_GREEN if accepted else COLOR_RED,
+    )
+    result_embed.set_footer(text=f"{SERVER_NAME} • Staff Applications")
+
+    try:
+        await channel.send(
+            content=mention,
+            embed=result_embed,
+            view=CloseTicketView(),
+            allowed_mentions=discord.AllowedMentions(users=True),
+        )
+    except Exception:
+        logger.exception("Failed to post decision message")
+
+    try:
+        await interaction.followup.send(f"Application #{app_id} marked as {decision_label}.", ephemeral=True)
+    except Exception:
+        pass
 
 
 class DenyReasonModal(discord.ui.Modal, title="Deny Application"):
@@ -668,27 +761,6 @@ async def build_transcript_text(channel: discord.TextChannel, member, applicant_
     return "\n".join(lines)
 
 
-async def upload_transcript_and_delete(guild, channel: discord.TextChannel, transcript_text: str, app_id: str):
-    if guild:
-        log_channel = guild.get_channel(LOG_CHANNEL_ID)
-        if log_channel:
-            try:
-                file = discord.File(io.BytesIO(transcript_text.encode("utf-8")), filename=f"transcript-{app_id}.txt")
-                await log_channel.send(content=f"📄 Transcript for application #{app_id}", file=file)
-            except Exception:
-                logger.exception("Failed to upload transcript")
-        else:
-            logger.warning("LOG_CHANNEL_ID not found or invalid")
-
-    try:
-        await channel.send("🗑️ Deleting this ticket in 30 seconds.")
-    except Exception:
-        pass
-
-    await asyncio.sleep(30)
-    await safe_delete_channel(channel, "Application reviewed/closed")
-
-
 # =========================================================================
 # UI VIEWS
 # =========================================================================
@@ -737,6 +809,50 @@ class ReviewView(discord.ui.View):
         logger.exception("ReviewView error", exc_info=error)
 
 
+class CloseTicketView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="🔒 Close Ticket", style=discord.ButtonStyle.gray, custom_id="close_ticket_btn")
+    async def close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        member = interaction.user
+        if not isinstance(member, discord.Member) or not is_staff(member):
+            try:
+                await interaction.response.send_message(embed=no_permission_embed(), ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        channel = interaction.channel
+        if not isinstance(channel, discord.TextChannel):
+            try:
+                await interaction.response.send_message("Invalid channel.", ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        button.disabled = True
+        try:
+            await interaction.response.edit_message(view=self)
+        except Exception:
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.defer()
+            except Exception:
+                pass
+
+        try:
+            await channel.send(f"🗑️ **{member.mention} is closing this ticket in 10 seconds...**")
+        except Exception:
+            pass
+
+        await asyncio.sleep(10)
+        await safe_delete_channel(channel, f"Ticket closed by {member}")
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item):
+        logger.exception("CloseTicketView error", exc_info=error)
+
+
 # =========================================================================
 # SLASH COMMANDS
 # =========================================================================
@@ -745,21 +861,44 @@ class ReviewView(discord.ui.View):
 @app_commands.guild_only()
 @app_commands.checks.has_permissions(administrator=True)
 async def panel(interaction: discord.Interaction):
+    guild = interaction.guild
+
     description_parts = [
-        "Interested in joining the Metal Drops team? Choose a position below to submit your application now!!",
+        "✨ **Join the Metal Drops Team!** ✨",
         "",
+        "We're always on the lookout for dedicated, passionate members to help our "
+        "community grow and thrive! 🚀",
+        "",
+        "📜 **How it works:**",
+        "1️⃣ Choose a position below\n"
+        "2️⃣ Answer 10 quick questions in your own private ticket\n"
+        "3️⃣ Our managers carefully review your application\n"
+        "4️⃣ Get notified via **DM** with the final result 📬",
+        "",
+        "⚠️ *Please answer honestly — misleading submissions will be disqualified.*",
+        "",
+        "**📌 Available Positions:**",
     ]
     for pdata in POSITIONS.values():
-        description_parts.append(f"> 🎫 Position: **{pdata['name']}**")
-        description_parts.append(f"> *{pdata['description']}*")
-        description_parts.append("> Take your time and answer honestly. Misleading submissions will result in disqualification.")
         description_parts.append("")
+        description_parts.append(f"> 🎫 **Position:** {pdata['name']}")
+        description_parts.append(f"> *{pdata['description']}*")
+        description_parts.append(
+            "> ⚠️ *Take your time and answer honestly. Misleading submissions will result in disqualification.*"
+        )
 
     embed = discord.Embed(
-        title="Staff Applications",
-        description="\n".join(description_parts).strip(),
+        title="🤘 Metal Drops — Staff Applications 🤘",
+        description="\n".join(description_parts),
         color=COLOR_BLURPLE,
     )
+    if guild and guild.icon:
+        try:
+            embed.set_thumbnail(url=guild.icon.url)
+        except Exception:
+            pass
+    if PANEL_BANNER_URL:
+        embed.set_image(url=PANEL_BANNER_URL)
     embed.set_footer(text=f"{SERVER_NAME} • Staff Applications")
 
     try:
@@ -777,9 +916,7 @@ async def panel(interaction: discord.Interaction):
 async def panel_error(interaction: discord.Interaction, error: Exception):
     if isinstance(error, app_commands.MissingPermissions):
         try:
-            await interaction.response.send_message(
-                "You need Administrator permission to use this command.", ephemeral=True
-            )
+            await interaction.response.send_message(embed=no_permission_embed(), ephemeral=True)
         except Exception:
             pass
     else:
@@ -792,7 +929,7 @@ async def closeticket(interaction: discord.Interaction):
     member = interaction.user
     if not isinstance(member, discord.Member) or not is_staff(member):
         try:
-            await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
+            await interaction.response.send_message(embed=no_permission_embed(), ephemeral=True)
         except Exception:
             pass
         return
@@ -829,11 +966,69 @@ async def closeticket(interaction: discord.Interaction):
         task.cancel()
 
     gmember = guild.get_member(applicant_id) if guild else None
+    if gmember is None and guild:
+        try:
+            gmember = await guild.fetch_member(applicant_id)
+        except Exception:
+            gmember = None
+
     transcript_text = await build_transcript_text(
         channel, gmember, applicant_id, position, info["app"], "CLOSED (force closed by staff)",
         "Force closed by staff", member
     )
-    asyncio.create_task(upload_transcript_and_delete(guild, channel, transcript_text, info["app"]))
+    await upload_transcript_to_log(guild, info["app"], transcript_text)
+    await send_transcript_dm(gmember, info["app"], transcript_text)
+
+    try:
+        await channel.send("🗑️ Deleting this ticket in 10 seconds...")
+    except Exception:
+        pass
+    await asyncio.sleep(10)
+    await safe_delete_channel(channel, "Force closed by staff")
+
+
+@bot.tree.command(name="diagnose", description="Check bot config (staff only)")
+@app_commands.guild_only()
+async def diagnose(interaction: discord.Interaction):
+    member = interaction.user
+    if not isinstance(member, discord.Member) or not is_staff(member):
+        try:
+            await interaction.response.send_message(embed=no_permission_embed(), ephemeral=True)
+        except Exception:
+            pass
+        return
+
+    guild = interaction.guild
+    lines = []
+
+    lines.append(f"**TICKET_CATEGORY_ID:** `{TICKET_CATEGORY_ID}` (type: {type(TICKET_CATEGORY_ID).__name__})")
+    cat = guild.get_channel(TICKET_CATEGORY_ID)
+    if cat is None:
+        lines.append("❌ Category NOT FOUND in this server. Check the ID is correct and belongs to this server.")
+    elif not isinstance(cat, discord.CategoryChannel):
+        lines.append(f"❌ Found a channel but it's a **{type(cat).__name__}**, not a category: `{cat.name}`")
+    else:
+        lines.append(f"✅ Category found: **{cat.name}**")
+
+    lines.append(f"\n**LOG_CHANNEL_ID:** `{LOG_CHANNEL_ID}`")
+    log_ch = guild.get_channel(LOG_CHANNEL_ID)
+    lines.append("✅ Found" if log_ch else "❌ NOT FOUND")
+
+    lines.append(f"\n**STAFF_ROLE_IDS:** `{STAFF_ROLE_IDS}`")
+    if not STAFF_ROLE_IDS:
+        lines.append("⚠️ EMPTY — only users with Manage Server permission will be treated as staff!")
+    for rid in STAFF_ROLE_IDS:
+        role = guild.get_role(rid)
+        lines.append(f"- `{rid}` → {'✅ ' + role.name if role else '❌ NOT FOUND'}")
+
+    missing_perms = check_bot_permissions(guild)
+    lines.append(f"\n**Bot permissions:** {'✅ All present' if not missing_perms else '❌ Missing: ' + ', '.join(missing_perms)}")
+
+    embed = discord.Embed(title="🔧 Metal Drops Config Diagnostic", description="\n".join(lines), color=COLOR_BLURPLE)
+    try:
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    except Exception:
+        pass
 
 
 @bot.tree.error
@@ -908,7 +1103,7 @@ async def on_member_remove(member: discord.Member):
     if channel:
         info = parse_topic(channel.topic or "")
         try:
-            await channel.send(f"{member} left {SERVER_NAME}. Closing this ticket.")
+            await channel.send(f"🚪 {member} left {SERVER_NAME}. Closing this ticket.")
         except Exception:
             pass
 
