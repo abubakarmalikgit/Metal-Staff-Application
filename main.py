@@ -22,9 +22,9 @@ from aiohttp import web
 
 SERVER_NAME = "Metal Drops"
 
-TICKET_CATEGORY_ID = 1556534009733840936        # ID of the category where ticket channels go
+TICKET_CATEGORY_ID = 1557069934293426216        # ID of the category where ticket channels go
 STAFF_ROLE_IDS = [1545782832004206592]                             # <-- PUT YOUR STAFF/MANAGER ROLE ID(S) HERE, e.g. [123456789012345678]
-LOG_CHANNEL_ID = 1545780177374675135            # Channel for transcripts
+LOG_CHANNEL_ID = 1556724009025150996           # Channel for transcripts
 ACCEPTED_ROLE_ID = 0                            # Role given on accept, 0 = none
 ANSWER_TIMEOUT_MINUTES = 15
 PANEL_BANNER_URL = ""                           # Optional: URL to a banner image for the panel embed
